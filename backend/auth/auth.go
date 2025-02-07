@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -10,7 +11,7 @@ import (
 )
 
 type Claims struct {
-	UserID string `json:"userid"`
+	Username string `json:"username"`
 	jwt.StandardClaims
 }
 
@@ -20,20 +21,21 @@ func GenerateJWT(userid string) (string, error, time.Time) {
 	expirationTime := time.Now().Add(5 * time.Minute)
 
 	claims := &Claims{
-		UserID: userid,
+		Username: userid,
 		StandardClaims: jwt.StandardClaims{
 			ExpiresAt: expirationTime.Unix(),
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	tokenString, err := token.SignedString([]byte(SECRET_KEY))
 
 	return tokenString, err, expirationTime
 }
 
-func VlidateJWT(token string) (jwt.Token, error) {
+func ValidateJWT(token string) (jwt.Token, error) {
+	fmt.Println("validate jwt called")
 	claims := &Claims{}
 	tkn, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
 		return []byte(SECRET_KEY), nil
@@ -41,7 +43,7 @@ func VlidateJWT(token string) (jwt.Token, error) {
 	return *tkn, err
 }
 
-func VlidateSession(c *gin.Context) bool {
+func ValidateSession(c *gin.Context) bool {
 	cookie, err := c.Cookie("token")
 
 	if err != nil {
@@ -52,7 +54,7 @@ func VlidateSession(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "error occured while getting cookie"})
 		return false
 	}
-	token, err := VlidateJWT(cookie)
+	token, err := ValidateJWT(cookie)
 	if err != nil {
 		if err == jwt.ErrSignatureInvalid {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized, signature invalid"})
@@ -71,12 +73,17 @@ func VlidateSession(c *gin.Context) bool {
 }
 
 func RefreshToken(c *gin.Context) (bool, error, time.Time) {
+	// cookies := c.Request.Cookies()
+	// for _, cookie := range cookies {
+	// 	fmt.Println("Cookie Found:", cookie.Name, "=", cookie.Value)
+	// }
+
 	token, err := c.Cookie("token")
 	if err != nil {
 		if err == http.ErrNoCookie {
-			return true, err, time.Time{}
+			return true, nil, time.Time{}
 		}
-		return false, err, time.Time{}
+		return true, err, time.Time{}
 	}
 
 	claims := &Claims{}
@@ -85,15 +92,11 @@ func RefreshToken(c *gin.Context) (bool, error, time.Time) {
 	})
 	if err != nil {
 		if err == jwt.ErrSignatureInvalid {
-			return false, nil, time.Time{}
+			return true, nil, time.Time{}
 		}
 		return false, err, time.Time{}
 	}
-
-	if !tkn.Valid {
-		return true, nil, time.Time{}
-	}
-	if time.Unix(claims.ExpiresAt, 0).Sub(time.Now()) < 30*time.Second {
+	if !tkn.Valid || time.Unix(claims.ExpiresAt, 0).Sub(time.Now()) < 30*time.Second {
 		return true, nil, time.Unix(claims.ExpiresAt, 0)
 	}
 
