@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -35,7 +34,7 @@ func GenerateJWT(userid string) (string, error, time.Time) {
 }
 
 func ValidateJWT(token string) (jwt.Token, error) {
-	fmt.Println("validate jwt called")
+	// fmt.Println("validate jwt called")
 	claims := &Claims{}
 	tkn, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
 		return []byte(SECRET_KEY), nil

@@ -30,9 +30,6 @@ func HashPassword(password string) string {
 }
 
 func VerifyPassword(userPassword string, providedPassword string) (bool, string) {
-	fmt.Println("Stored Hashed Password:", userPassword)
-	fmt.Println("Provided Password:", providedPassword)
-
 	err := bcrypt.CompareHashAndPassword([]byte(userPassword), []byte(providedPassword))
 	if err != nil {
 		return false, "password is incorrect"
@@ -43,45 +40,58 @@ func VerifyPassword(userPassword string, providedPassword string) (bool, string)
 func SignUp(c *gin.Context) {
 	var user models.User
 	if err := c.BindJSON(&user); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data"})
 		return
 	}
-	var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
+	fmt.Println("user at signup: ", user.Email)
+	fmt.Println("user at signup: ", user.Name)
 
-	emailCount, err := userCollection.CountDocuments(ctx, bson.M{"email": user.Email})
+	// if user.Password == nil || user.Name == nil {
+	// 	c.JSON(http.StatusBadRequest, gin.H{"error": "Name and password are required"})
+	// 	return
+	// }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
 
+	emailCount, err := userCollection.CountDocuments(ctx, bson.M{"email": user.Email})
 	if err != nil {
-		log.Fatal(err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "error occured while checking for the email"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error while checking email"})
+		return
 	}
 
 	if emailCount > 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user with this email already exists"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User with this email already exists"})
 		return
 	}
 
-	password := HashPassword(*user.Password)
-	user.Password = &password
+	hashedPassword := HashPassword(*user.Password)
+	user.Password = &hashedPassword
 	user.ID = primitive.NewObjectID()
 	user.CreatedAt = primitive.NewDateTimeFromTime(time.Now())
 	user.UpdatedAt = primitive.NewDateTimeFromTime(time.Now())
 
 	_, insertErr := userCollection.InsertOne(ctx, user)
 	if insertErr != nil {
-		msg := fmt.Sprintf("user item was not %s", "created")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "User could not be created"})
+		return
 	}
 
 	userID := user.ID.Hex()
-	username := *user.Name
+	username := ""
+	if user.Name != nil {
+		username = *user.Name
+	} else {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Username is missing"})
+		return
+	}
 
 	token, err, expirationTime := auth.GenerateJWT(userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "error occured while generating token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error generating token"})
 		return
 	}
-	//c.SetCookie(name, value, maxAge, path, domain, secure, httpOnly)
+
 	c.SetCookie("userid", userID, int(expirationTime.Sub(time.Now()).Seconds()), "/", "", false, true)
 	c.SetCookie("username", username, int(expirationTime.Sub(time.Now()).Seconds()), "/", "", false, true)
 	c.SetCookie("token", token, int(expirationTime.Sub(time.Now()).Seconds()), "/", "", false, true)
@@ -92,34 +102,45 @@ func SignUp(c *gin.Context) {
 		"username": username,
 		"token":    token,
 	})
-
 }
 
 func Login(c *gin.Context) {
 	var user models.User
 	if err := c.BindJSON(&user); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data"})
 		return
 	}
 
-	var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
+	if user.Email == nil || user.Password == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
 
 	var foundUser models.User
-	err := userCollection.FindOne(ctx, bson.M{"email": user.Email}).Decode(&foundUser)
+	err := userCollection.FindOne(ctx, bson.M{"email": *user.Email}).Decode(&foundUser)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "email is not valid"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		return
+	}
+
+	// Ensure that the password field is not nil before dereferencing
+	if foundUser.Password == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Password not found in database"})
 		return
 	}
 
 	passwordIsValid, msg := VerifyPassword(*foundUser.Password, *user.Password)
 	if !passwordIsValid {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": msg})
 		return
 	}
 
-	if foundUser.Email == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "user not found"})
+	// Ensure that the username is not nil before dereferencing
+	if foundUser.Name == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Username not found in database"})
 		return
 	}
 
@@ -128,27 +149,59 @@ func Login(c *gin.Context) {
 
 	shouldRefresh, err, expirationTime := auth.RefreshToken(c)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "refresh token error", "err": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh token error"})
 		return
 	}
+
 	token := ""
 	if shouldRefresh {
 		token, err, expirationTime = auth.GenerateJWT(userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "error occured while generating token"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error generating token"})
 			return
 		}
 	}
 
+	// Set cookies
 	c.SetCookie("userid", userID, int(expirationTime.Sub(time.Now()).Seconds()), "/", "", false, true)
 	c.SetCookie("username", username, int(expirationTime.Sub(time.Now()).Seconds()), "/", "", false, true)
 	if shouldRefresh {
 		c.SetCookie("token", token, int(expirationTime.Sub(time.Now()).Seconds()), "/", "", false, true)
 	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "User logged in successfully",
 		"userid":   userID,
 		"username": username,
 		"token":    token,
+	})
+}
+
+func Logout(c *gin.Context) {
+	c.SetCookie("userid", "", -1, "/", "", false, true)
+	c.SetCookie("username", "", -1, "/", "", false, true)
+	c.SetCookie("token", "", -1, "/", "", false, true)
+
+	c.JSON(http.StatusOK, gin.H{"message": "logged out successfully"})
+
+}
+
+func CheckAuth(c *gin.Context) {
+	userID, err := c.Cookie("userid")
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	username, err := c.Cookie("username")
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Username not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "User is authenticated",
+		"userid":   userID,
+		"username": username,
 	})
 }
